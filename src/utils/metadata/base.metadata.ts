@@ -14,5 +14,6 @@ export type SDResource = {
   type: string;
   name: string;
   weight?: number;
+  weightClip?: number;
   hash?: string;
 };

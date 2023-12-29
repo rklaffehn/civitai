@@ -1,7 +1,7 @@
 import { samplerMap } from '~/server/common/constants';
 import { ComfyMetaSchema, ImageMetaProps } from '~/server/schema/image.schema';
 import { findKeyForValue } from '~/utils/map-helpers';
-import { createMetadataProcessor } from '~/utils/metadata/base.metadata';
+import { createMetadataProcessor, SDResource } from '~/utils/metadata/base.metadata';
 import { fromJson } from '../json-helpers';
 
 const AIR_KEYS = ['ckpt_airs', 'lora_airs', 'embedding_airs'];
@@ -19,7 +19,9 @@ export const comfyMetadataProcessor = createMetadataProcessor({
     const upscalers: string[] = [];
     const vaes: string[] = [];
     const controlNets: string[] = [];
-    const additionalResources: AdditionalResource[] = [];
+    const additionalResources: SDResource[] = [];
+    const hashes: Record<string, string> = {};
+
     for (const node of Object.values(prompt)) {
       for (const [key, value] of Object.entries(node.inputs)) {
         if (Array.isArray(value)) node.inputs[key] = prompt[value[0]];
@@ -41,15 +43,33 @@ export const comfyMetadataProcessor = createMetadataProcessor({
         const strength = node.inputs.strength_model as number;
         if (strength < 0.001 && strength > -0.001) continue;
 
+        const hash_value = (node.lora_hash as string) || undefined;
+
+        const lora_name = modelFileName(node.inputs.lora_name as string);
+        if (hash_value) {
+          /* This seems to be what the automatic1111 extension for CivitAI generates for LoRAs. */
+          hashes[`lora:${lora_name}`] = hash_value;
+        }
+
         additionalResources.push({
-          name: node.inputs.lora_name as string,
+          name: lora_name,
           type: 'lora',
-          strength,
-          strengthClip: node.inputs.strength_clip as number,
+          weight: strength,
+          weightClip: node.inputs.strength_clip as number,
+          hash: hash_value,
         });
       }
 
-      if (node.class_type == 'CheckpointLoaderSimple') models.push(node.inputs.ckpt_name as string);
+      if (node.class_type == 'CheckpointLoaderSimple') {
+        const model_name = modelFileName(node.inputs.ckpt_name as string);
+        models.push(model_name);
+
+        const hash_value = (node.ckpt_hash as string) || undefined;
+
+        if (!hashes.model && hash_value) hashes.model = hash_value;
+
+        additionalResources.push({ name: model_name, type: 'model', hash: hash_value });
+      }
 
       if (node.class_type == 'UpscaleModelLoader') upscalers.push(node.inputs.model_name as string);
 
@@ -89,6 +109,7 @@ export const comfyMetadataProcessor = createMetadataProcessor({
       denoise: initialSamplerNode.denoise,
       width: initialSamplerNode.latent_image.inputs.width,
       height: initialSamplerNode.latent_image.inputs.height,
+      hashes: hashes,
       models,
       upscalers,
       vaes,
@@ -99,6 +120,13 @@ export const comfyMetadataProcessor = createMetadataProcessor({
       // Converting to string to reduce bytes size
       comfy: JSON.stringify({ prompt, workflow }),
     };
+
+    // Paranoia! If all else fails, the meta data lookup also checks these attributes.
+    const model_resource = additionalResources.find((resource) => resource.type === 'model');
+    if (model_resource) {
+      metadata['Model'] = model_resource.name;
+      metadata['Model hash'] = model_resource.hash;
+    }
 
     // Handle control net apply
     if (initialSamplerNode.positive.class_type === 'ControlNetApply') {
@@ -156,10 +184,26 @@ function getNumberValue(input: ComfyNumber) {
   return input.inputs.Value as number;
 }
 
+/** ComfyUI can handle models in sub-directories but we need the raw filename here.
+ *
+ * @param name The model's name, possibly with a relative path prefix
+ * @returns The model's filename only
+ */
+function modelFileName(name: string): string {
+  const sep_expr = /\\(\\\\)*/g;
+  name = name.replace(sep_expr, '/');
+  const parts = name.split('/');
+  return parts[parts.length - 1].replace(/\.[^/.]+$/, '');
+}
+
 // #region [types]
 type ComfyNode = {
   inputs: Record<string, number | string | Array<string | number> | ComfyNode>;
   class_type: string;
+  /* ComfyUI must somehow transport model hashes (first ten digits of the file's sha256) in its prompt. One solution
+     could be adding them to the load nodes from where we also pick the model names. */
+  ckpt_hash?: string;
+  lora_hash?: string;
 };
 
 type SamplerNode = {
@@ -173,12 +217,5 @@ type SamplerNode = {
   positive: ComfyNode;
   negative: ComfyNode;
   latent_image: ComfyNode;
-};
-
-type AdditionalResource = {
-  name: string;
-  type: string;
-  strength: number;
-  strengthClip: number;
 };
 // #endregion
