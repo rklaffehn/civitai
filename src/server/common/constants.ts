@@ -108,7 +108,7 @@ export const constants = {
   cardSizes: {
     model: 320,
     image: 320,
-    articles: 450,
+    articles: 320,
     bounty: 332,
     club: 320,
   },
@@ -241,10 +241,13 @@ export const constants = {
     tierImageDisplayWidth: 124,
     tierImageSidebarDisplayWidth: 84,
     avatarDisplayWidth: 124,
-    minMonthlyBuzz: 3000,
-    headerImageAspectRatio: 1 / 6,
+    minMonthlyBuzz: 5,
+    minStripeCharge: 3000, // 3000 Buzz = $3.00 USD
+    headerImageAspectRatio: 1 / 4,
     postCoverImageAspectRatio: 1 / 4,
     engagementTypes: ['engaged'],
+    coverImageHeight: 400,
+    coverImageWidth: 1600,
   },
 } as const;
 

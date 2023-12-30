@@ -11,6 +11,7 @@ import {
   getDownloadCommandHandler,
   getModelByHashesHandler,
   getModelDetailsForReviewHandler,
+  getModelGallerySettingsHandler,
   getModelHandler,
   getModelReportDetailsHandler,
   getModelsInfiniteHandler,
@@ -28,6 +29,7 @@ import {
   restoreModelHandler,
   toggleModelLockHandler,
   unpublishModelHandler,
+  updateGallerySettingsHandler,
   upsertModelHandler,
 } from '~/server/controllers/model.controller';
 import { dbRead } from '~/server/db/client';
@@ -55,6 +57,7 @@ import {
   toggleModelLockSchema,
   unpublishModelSchema,
   getSimpleModelsInfiniteSchema,
+  updateGallerySettingsSchema,
 } from '~/server/schema/model.schema';
 import {
   getAllModelsWithCategories,
@@ -150,11 +153,20 @@ const applyUserPreferences = middleware(async ({ input, ctx, next }) => {
   });
 });
 
+const skipEdgeCache = middleware(async ({ input, ctx, next }) => {
+  const _input = input as GetAllModelsOutput;
+
+  return next({
+    ctx: { user: ctx.user, cache: { ...ctx.cache, skip: _input.favorites || _input.hidden } },
+  });
+});
+
 export const modelRouter = router({
   getById: publicProcedure.input(getByIdSchema).query(getModelHandler),
   getAll: publicProcedure
     .input(getAllModelsSchema.extend({ page: z.never().optional() }))
     // .use(applyUserPreferences)
+    .use(skipEdgeCache)
     .use(edgeCacheIt({ ttl: 60, tags: () => ['models'] }))
     .query(getModelsInfiniteHandler),
   getAllPagedSimple: publicProcedure
@@ -225,7 +237,7 @@ export const modelRouter = router({
   setCategory: protectedProcedure
     .input(setModelsCategorySchema)
     .mutation(({ input, ctx }) => setModelsCategory({ ...input, userId: ctx.user?.id })),
-  findResourcesToAssociate: publicProcedure
+  findResourcesToAssociate: protectedProcedure
     .input(findResourcesToAssociateSchema)
     .query(findResourcesToAssociateHandler),
   getAssociatedResourcesCardData: publicProcedure
@@ -241,4 +253,9 @@ export const modelRouter = router({
   rescan: moderatorProcedure.input(getByIdSchema).mutation(({ input }) => rescanModel(input)),
   getModelsByHash: publicProcedure.input(modelByHashesInput).mutation(getModelByHashesHandler),
   getTemplateFields: guardedProcedure.input(getByIdSchema).query(getModelTemplateFieldsHandler),
+  getGallerySettings: publicProcedure.input(getByIdSchema).query(getModelGallerySettingsHandler),
+  updateGallerySettings: guardedProcedure
+    .input(updateGallerySettingsSchema)
+    .use(isOwnerOrModerator)
+    .mutation(updateGallerySettingsHandler),
 });

@@ -5,8 +5,6 @@ import { PageLoader } from '~/components/PageLoader/PageLoader';
 import { NotFound } from '~/components/AppLayout/NotFound';
 import { AppLayout } from '~/components/AppLayout/AppLayout';
 import {
-  Alert,
-  Anchor,
   Button,
   Center,
   Container,
@@ -16,7 +14,6 @@ import {
   Group,
   Loader,
   LoadingOverlay,
-  Paper,
   Stack,
   Text,
   Title,
@@ -26,41 +23,20 @@ import { constants } from '~/server/common/constants';
 import { ImageGuard } from '~/components/ImageGuard/ImageGuard';
 import { MediaHash } from '~/components/ImageHash/ImageHash';
 import { ImagePreview } from '~/components/ImagePreview/ImagePreview';
-import { AlertWithIcon } from '~/components/AlertWithIcon/AlertWithIcon';
-import {
-  IconAlertCircle,
-  IconClock,
-  IconClubs,
-  IconInfoCircle,
-  IconManualGearbox,
-  IconPencilMinus,
-  IconPlus,
-  IconSettings,
-} from '@tabler/icons-react';
-import { ClubManagementNavigation } from '~/components/Club/ClubManagementNavigation';
+import { IconClock, IconClubs, IconPlus, IconSettings } from '@tabler/icons-react';
 import { ClubFeedNavigation } from '~/components/Club/ClubFeedNavigation';
 import { RenderHtml } from '~/components/RenderHtml/RenderHtml';
 import { ContentClamp } from '~/components/ContentClamp/ContentClamp';
-import { useCurrentUser } from '~/hooks/useCurrentUser';
 import { useClubContributorStatus, useQueryClubPosts } from '~/components/Club/club.utils';
 import { InViewLoader } from '~/components/InView/InViewLoader';
-import { EndOfFeed } from '~/components/EndOfFeed/EndOfFeed';
-import { NoContent } from '~/components/NoContent/NoContent';
-import {
-  ClubPostUpsertForm,
-  ClubPostUpsertFormModal,
-} from '~/components/Club/ClubPost/ClubPostUpsertForm';
 import { ClubPostItem, useClubFeedStyles } from '~/components/Club/ClubPost/ClubFeed';
-import { ClubTierItem, useToggleClubMembershipCancelStatus } from '~/components/Club/ClubTierItem';
+import { ClubMembershipStatus, ClubTierItem } from '~/components/Club/ClubTierItem';
 import { dialogStore } from '~/components/Dialog/dialogStore';
-import { formatDate } from '~/utils/date-helpers';
 import { containerQuery } from '~/utils/mantine-css-helpers';
-import { ClubAdminPermission, Currency } from '@prisma/client';
 import { ClubAddContent } from '~/components/Club/ClubAddContent';
-import { CurrencyBadge } from '../../../components/Currency/CurrencyBadge';
+import { Meta } from '../../../components/Meta/Meta';
 
 const Feed = () => {
-  const utils = trpc.useContext();
   const router = useRouter();
   const { id: stringId } = router.query as {
     id: string;
@@ -69,11 +45,6 @@ const Feed = () => {
   const { clubPosts, isLoading, fetchNextPage, hasNextPage, isRefetching } = useQueryClubPosts(id);
   const { data: userClubs = [], isLoading: isLoadingUserClubs } =
     trpc.club.userContributingClubs.useQuery();
-  const { classes } = useClubFeedStyles();
-
-  const canPost = useMemo(() => {
-    return userClubs.some((c) => c.id === id);
-  }, [userClubs, isLoadingUserClubs]);
 
   return (
     <>
@@ -84,7 +55,7 @@ const Feed = () => {
       ) : !!clubPosts.length ? (
         <div style={{ position: 'relative' }}>
           <LoadingOverlay visible={isRefetching ?? false} zIndex={9} />
-          <Stack spacing="md" mt="md">
+          <Stack spacing="md" mt="md" align="center">
             {clubPosts.map((clubPost) => (
               <ClubPostItem key={clubPost.id} clubPost={clubPost} />
             ))}
@@ -177,14 +148,8 @@ export const FeedLayout = ({ children }: { children: React.ReactNode }) => {
     clubId: id,
   });
 
-  const { data: membership } = trpc.clubMembership.getClubMembershipOnClub.useQuery({
-    clubId: id,
-  });
   const { classes } = useStyles({ hasHeaderImage: !!club?.headerImage });
   const canPost = isOwner || isModerator || isClubAdmin;
-  const { isCancelled, isToggling, toggleCancelStatus } = useToggleClubMembershipCancelStatus({
-    clubId: id,
-  });
 
   const { data: tiers = [], isLoading: isLoadingTiers } = trpc.club.getTiers.useQuery(
     {
@@ -207,6 +172,12 @@ export const FeedLayout = ({ children }: { children: React.ReactNode }) => {
 
   return (
     <AppLayout>
+      {club && (
+        <Meta
+          title={`${club.name} - Club hosted by ${club.user.username}`}
+          description={club.description ?? undefined}
+        />
+      )}
       <Container fluid p={0} mt={club.headerImage ? '-md' : ''}>
         {club.headerImage && (
           <ImageCSSAspectRatioWrap
@@ -226,7 +197,7 @@ export const FeedLayout = ({ children }: { children: React.ReactNode }) => {
                         ) : (
                           <ImagePreview
                             image={image}
-                            edgeImageProps={{ width: 1200 }}
+                            edgeImageProps={{ width: 1600 }}
                             style={{ width: '100%', height: '100%' }}
                             aspectRatio={0}
                           />
@@ -321,64 +292,7 @@ export const FeedLayout = ({ children }: { children: React.ReactNode }) => {
               <Grid.Col xs={12} md={3}>
                 <Stack>
                   <Title order={3}>Membership Tiers</Title>
-                  {membership?.cancelledAt ? (
-                    <Alert color="yellow">
-                      <Stack>
-                        <Text size="sm">
-                          Your membership was cancelled on {formatDate(membership.cancelledAt)} and
-                          will be active until{' '}
-                          <Text weight="bold" component="span">
-                            {formatDate(membership.expiresAt)}
-                          </Text>
-                          .
-                        </Text>
-                        <Button
-                          size="xs"
-                          onClick={toggleCancelStatus}
-                          loading={isToggling}
-                          variant="subtle"
-                          color="yellow"
-                        >
-                          {isCancelled ? 'Restore membership' : 'Cancel membership'}
-                        </Button>
-                      </Stack>
-                    </Alert>
-                  ) : membership?.nextBillingAt ? (
-                    <Alert color="yellow">
-                      <Stack spacing={4}>
-                        <Text size="sm">You are a member of this club.</Text>
-                        {membership?.unitAmount > 0 && (
-                          <>
-                            <Text size="sm">
-                              Your next billing date is{' '}
-                              <Text weight="bold" component="span">
-                                {formatDate(membership.nextBillingAt)}
-                              </Text>
-                              .
-                            </Text>
-                            <Text>
-                              Your monthly fee is{' '}
-                              <CurrencyBadge
-                                unitAmount={membership.unitAmount}
-                                currency={Currency.BUZZ}
-                              />
-                              .
-                            </Text>
-                          </>
-                        )}
-                        <Button
-                          size="xs"
-                          onClick={toggleCancelStatus}
-                          loading={isToggling}
-                          variant="subtle"
-                          color="yellow"
-                          mt="md"
-                        >
-                          {isCancelled ? 'Restore membership' : 'Cancel membership'}
-                        </Button>
-                      </Stack>
-                    </Alert>
-                  ) : null}
+                  <ClubMembershipStatus clubId={club.id} />
                   {tiers.length > 0 ? (
                     <>
                       {tiers.map((tier) => (

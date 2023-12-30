@@ -42,13 +42,19 @@ import { env } from '~/env/client.mjs';
 import { toStringList } from '~/utils/array-helpers';
 import { useBrowserRouter } from '~/components/BrowserRouter/BrowserRouterProvider';
 import { containerQuery } from '~/utils/mantine-css-helpers';
+import { ClubRequirementIndicator, ClubRequirementNotice } from '../../Club/ClubRequirementNotice';
 
 export function PostDetail({ postId }: { postId: number }) {
   const currentUser = useCurrentUser();
   const { query } = useBrowserRouter();
   const theme = useMantineTheme();
   const { data: post, isLoading: postLoading } = trpc.post.get.useQuery({ id: postId });
-  const { images, isLoading: imagesLoading } = useQueryImages({ postId });
+  const { images, isLoading: imagesLoading } = useQueryImages(
+    { postId, limit: post?.hasAccess ? undefined : 1 },
+    // Haivng this be enabled only when the post is available is a bit slower for the user
+    // but prevents users with no access from looking at all the images in the post
+    { enabled: !!post }
+  );
   const { data: postResources = [] } = trpc.post.getResources.useQuery({ id: postId });
 
   const meta = (
@@ -153,6 +159,12 @@ export function PostDetail({ postId }: { postId: number }) {
                 )}
               </Group>
               <Group spacing="xs" position="right" sx={{ flex: '1 0 !important' }} noWrap>
+                <ClubRequirementIndicator
+                  entityId={post.id}
+                  entityType="Post"
+                  radius="xl"
+                  size="md"
+                />
                 <Button
                   size="md"
                   radius="xl"
@@ -185,7 +197,11 @@ export function PostDetail({ postId }: { postId: number }) {
                     <Text size="xs">Share</Text>
                   </Button>
                 </ShareButton>
-                <PostControls postId={post.id} userId={post.user.id}>
+                <PostControls
+                  postId={post.id}
+                  userId={post.user.id}
+                  isModelVersionPost={post.modelVersionId}
+                >
                   <ActionIcon
                     variant={theme.colorScheme === 'dark' ? 'filled' : 'light'}
                     size={30}
@@ -218,6 +234,7 @@ export function PostDetail({ postId }: { postId: number }) {
                 <FollowUserButton userId={post.user.id} size="md" compact />
               </Group>
             </Group>
+            <ClubRequirementNotice entityId={post.id} entityType="Post" />
           </Stack>
           <Container size="sm">
             <PostImages postId={post.id} images={images} isLoading={imagesLoading} />

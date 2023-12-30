@@ -86,6 +86,7 @@ export function UserAvatar({
   avatarSize,
   userId,
   indicatorProps,
+  badgeSize,
 }: Props) {
   const currentUser = useCurrentUser();
   const theme = useMantineTheme();
@@ -104,7 +105,7 @@ export function UserAvatar({
   textSize ??= mapAvatarTextSize[size].textSize;
   subTextSize ??= mapAvatarTextSize[size].subTextSize;
 
-  const imageSize = getRawAvatarSize(avatarSize ?? size);
+  const imageSize = getRawAvatarSize(avatarProps?.size ?? avatarSize ?? size);
   const imageRadius = getRawAvatarRadius(avatarProps?.radius ?? radius, theme);
   const isSelf = !!currentUser && currentUser.id === avatarUser.id;
   const blockedProfilePicture = avatarUser.profilePicture?.ingestion === 'Blocked';
@@ -154,7 +155,7 @@ export function UserAvatar({
                             {safe || isSelf ? (
                               <EdgeMedia
                                 src={image.url}
-                                width="original"
+                                width={450}
                                 name={image.name ?? image.id.toString()}
                                 alt={
                                   avatarUser.username && !userDeleted
@@ -219,7 +220,7 @@ export function UserAvatar({
           {withUsername && (
             <UserProfileLink user={avatarUser} linkToProfile={linkToProfile}>
               <Group spacing={4} align="center">
-                <Username {...avatarUser} size={textSize} />
+                <Username {...avatarUser} size={textSize} badgeSize={badgeSize} />
                 {badge}
               </Group>
             </UserProfileLink>
@@ -255,6 +256,7 @@ type Props = {
   avatarSize?: MantineSize | number;
   userId?: number;
   indicatorProps?: Omit<IndicatorProps, 'children'>;
+  badgeSize?: number;
 };
 
 const UserProfileLink = ({

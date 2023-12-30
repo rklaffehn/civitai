@@ -1,4 +1,7 @@
 import {
+  Availability,
+  CollectionContributorPermission,
+  CollectionReadConfiguration,
   ImageGenerationProcess,
   ImageIngestionStatus,
   MediaType,
@@ -25,7 +28,7 @@ import {
   ingestImage,
 } from '~/server/services/image.service';
 import { getTagCountForImages, getTypeCategories } from '~/server/services/tag.service';
-import { getCosmeticsForUsers } from '~/server/services/user.service';
+import { getCosmeticsForUsers, getProfilePicturesForUsers } from '~/server/services/user.service';
 import { throwDbError, throwNotFoundError } from '~/server/utils/errorHandling';
 import { isDefined } from '~/utils/type-guards';
 import {
@@ -43,6 +46,12 @@ import {
 import { editPostSelect } from './../selectors/post.selector';
 import { postgresSlugify } from '~/utils/string-helpers';
 import { profileImageSelect } from '../selectors/image.selector';
+import { bustCacheTag, queryCache } from '~/server/utils/cache-helpers';
+import { getClubDetailsForResource, upsertClubResource } from './club.service';
+import { entityRequiresClub, hasEntityAccess } from './common.service';
+import { env } from 'process';
+import { CacheTTL } from '../common/constants';
+import { getPrivateEntityAccessForUser } from './user-cache.service';
 
 type GetAllPostsRaw = {
   id: number;
@@ -55,6 +64,11 @@ type GetAllPostsRaw = {
   profilePictureId: number | null;
   publishedAt: Date | null;
   cursorId: Date | number | null;
+  unlisted: boolean;
+  modelVersionId: number | null;
+  collectionId: number | null;
+  availability: Availability;
+  detail?: string | null;
   stats: {
     commentCount: number;
     likeCount: number;
@@ -70,8 +84,6 @@ export const getPostsInfinite = async ({
   cursor,
   query,
   username,
-  excludedTagIds,
-  excludedUserIds,
   excludedImageIds,
   period,
   periodMode,
@@ -84,18 +96,30 @@ export const getPostsInfinite = async ({
   include,
   draftOnly,
   followed,
+  clubId,
   browsingMode,
-}: PostsQueryInput & { user?: SessionUser }) => {
+}: Omit<PostsQueryInput, 'include'> & {
+  user?: { id: number; isModerator?: boolean; username?: string };
+  ignoreListedStatus?: boolean;
+  include?: string[];
+}) => {
   const AND = [Prisma.sql`1 = 1`];
+  const WITH: Prisma.Sql[] = [];
+  const cacheTags: string[] = [];
+  let cacheTime = CacheTTL.xs;
 
   const isOwnerRequest =
-    !!user && !!username && postgresSlugify(user.username) === postgresSlugify(username);
+    !!user?.username && !!username && postgresSlugify(user.username) === postgresSlugify(username);
+
   let targetUser: number | undefined;
+
   if (username) {
     const record = await dbRead.user.findFirst({ where: { username }, select: { id: true } });
+
     if (record) {
       targetUser = record.id;
       AND.push(Prisma.sql`p."userId" = ${targetUser}`);
+      cacheTags.push(`posts-user:${targetUser}`);
     }
   }
 
@@ -110,6 +134,7 @@ export const getPostsInfinite = async ({
         },
       },
     });
+
     const followedUsersIds =
       followedUsers?.engagingUsers?.map(({ targetUser }) => targetUser.id) ?? [];
     AND.push(
@@ -119,60 +144,42 @@ export const getPostsInfinite = async ({
     );
   }
 
-  if (modelVersionId) AND.push(Prisma.sql`p."modelVersionId" = ${modelVersionId}`);
+  if (modelVersionId) {
+    AND.push(Prisma.sql`p."modelVersionId" = ${modelVersionId}`);
+    cacheTags.push(`posts-modelVersion:${modelVersionId}`);
+  }
 
   const joins: string[] = [];
   if (!isOwnerRequest) {
-    if (browsingMode === BrowsingMode.SFW) AND.push(Prisma.sql`p."nsfw" = false`);
     AND.push(Prisma.sql`p."publishedAt" < now()`);
+
+    // We could techically do this on the FE.
+    if (browsingMode === BrowsingMode.SFW) {
+      AND.push(Prisma.sql`p."nsfw" = false`);
+    }
+
     if (period !== 'AllTime' && periodMode !== 'stats') {
       AND.push(Prisma.raw(`p."publishedAt" > now() - INTERVAL '1 ${period.toLowerCase()}'`));
     }
-    if (query) AND.push(Prisma.sql`p.title ILIKE ${query + '%'}`);
-    if (!!excludedTagIds?.length && (!user || user.id !== targetUser)) {
-      AND.push(Prisma.sql`NOT EXISTS (
-        SELECT 1 FROM
-        "TagsOnPost" top
-        WHERE top."postId" = p.id
-        AND top."tagId" IN (${Prisma.join(excludedTagIds)})
-      )`);
-      AND.push(Prisma.sql`EXISTS (
-        SELECT 1 FROM "Image" i
-        WHERE i."postId" = p.id AND i."ingestion" = 'Scanned'
-      )`);
-    }
+
     if (!!tags?.length)
       AND.push(Prisma.sql`EXISTS (
         SELECT 1 FROM "TagsOnPost" top
         WHERE top."postId" = p.id AND top."tagId" IN (${Prisma.join(tags)})
       )`);
 
-    if (!!excludedUserIds?.length)
-      AND.push(Prisma.sql`p."userId" NOT IN (${Prisma.join(excludedUserIds)})`);
-    if (!user?.isModerator) {
-      // Handle Post Visibility
-      joins.push('LEFT JOIN "ModelVersion" mv ON p."modelVersionId" = mv.id');
-      AND.push(Prisma.sql`(p."modelVersionId" IS NULL OR mv.status = 'Published')`);
-
-      // Handle Collection Visibility
-      joins.push('LEFT JOIN "Collection" c ON p."collectionId" = c.id');
-      const collectionOr = [Prisma.sql`p."collectionId" IS NULL`, Prisma.sql`c.read = 'Public'`];
-      if (user?.id) {
-        joins.push(
-          `LEFT JOIN "CollectionContributor" cc ON cc."collectionId" = c.id AND cc."userId" = ${user.id}`
-        );
-
-        collectionOr.push(Prisma.sql`'VIEW' = ANY(cc.permissions)`);
-      }
-
-      AND.push(Prisma.sql`(${Prisma.join(collectionOr, ' OR ')})`);
+    if (query) {
+      AND.push(Prisma.sql`p.title ILIKE ${query + '%'}`);
     }
   } else {
     if (draftOnly) AND.push(Prisma.sql`p."publishedAt" IS NULL`);
     else AND.push(Prisma.sql`p."publishedAt" IS NOT NULL`);
   }
+
   if (ids) AND.push(Prisma.sql`p.id IN (${Prisma.join(ids)})`);
   if (collectionId) {
+    cacheTime = CacheTTL.day;
+
     const permissions = await getUserCollectionPermissionsById({
       userId: user?.id,
       id: collectionId,
@@ -214,7 +221,35 @@ export const getPostsInfinite = async ({
       AND.push(Prisma.sql`${Prisma.raw(cursorProp + ' ' + cursorOperator)} ${cursorValue}`);
   }
 
-  const postsRaw = await dbRead.$queryRaw<GetAllPostsRaw[]>`
+  if (clubId) {
+    cacheTime = 0; //CacheTTL.day;
+    cacheTags.push(`posts-club:${clubId}`);
+
+    WITH.push(Prisma.sql`
+      "clubPosts" AS (
+        SELECT DISTINCT ON (p."id") p."id" as "postId"
+        FROM "EntityAccess" ea
+        JOIN "Post" p ON p."id" = ea."accessToId"
+        LEFT JOIN "ClubTier" ct ON ea."accessorType" = 'ClubTier' AND ea."accessorId" = ct."id" AND ct."clubId" = ${clubId}
+        WHERE (
+            (
+             ea."accessorType" = 'Club' AND ea."accessorId" = ${clubId}
+            )
+            OR (
+              ea."accessorType" = 'ClubTier' AND ct."clubId" = ${clubId}
+            )
+          )
+          AND ea."accessToType" = 'Post'
+      )
+    `);
+
+    joins.push(`JOIN "clubPosts" cp ON cp."postId" = p."id"`);
+  }
+
+  const queryWith = WITH.length > 0 ? Prisma.sql`WITH ${Prisma.join(WITH, ', ')}` : Prisma.sql``;
+
+  const postsRawQuery = Prisma.sql`
+    ${queryWith}
     SELECT
       p.id,
       p.nsfw,
@@ -225,6 +260,11 @@ export const getPostsInfinite = async ({
       u."deletedAt",
       u."profilePictureId",
       p."publishedAt",
+      p."unlisted",
+      p."modelVersionId",
+      p."collectionId",
+      ${include?.includes('detail') ? Prisma.sql`p."detail",` : Prisma.sql``}
+      p."availability",
       (
         SELECT jsonb_build_object(
           'cryCount', COALESCE(pm."cryCount", 0),
@@ -245,6 +285,22 @@ export const getPostsInfinite = async ({
     ORDER BY ${Prisma.raw(orderBy)}
     LIMIT ${limit + 1}`;
 
+  if (
+    query ||
+    isOwnerRequest ||
+    (!!user && followed) ||
+    !env.POST_QUERY_CACHING ||
+    (collectionId && !!user?.id)
+  ) {
+    cacheTime = 0;
+  }
+
+  const cacheable = queryCache(dbRead, 'getPostsInfinite', 'v1');
+  const postsRaw = await cacheable<GetAllPostsRaw[]>(postsRawQuery, {
+    ttl: cacheTime,
+    tag: cacheTags,
+  });
+
   let nextCursor: number | Date | undefined | null;
   if (postsRaw.length > limit) {
     const nextItem = postsRaw.pop();
@@ -254,8 +310,6 @@ export const getPostsInfinite = async ({
   const images = postsRaw.length
     ? await getImagesForPosts({
         postIds: postsRaw.map((x) => x.id),
-        excludedTagIds,
-        excludedUserIds,
         excludedIds: excludedImageIds,
         userId: user?.id,
         isOwnerRequest,
@@ -263,17 +317,90 @@ export const getPostsInfinite = async ({
     : [];
 
   // Get user cosmetics
+  const userIds = postsRaw.map((i) => i.userId);
   const userCosmetics = include?.includes('cosmetics')
-    ? await getCosmeticsForUsers(postsRaw.map((i) => i.userId))
+    ? await getCosmeticsForUsers(userIds)
     : undefined;
-  const profilePictures = await dbRead.image.findMany({
-    where: { id: { in: postsRaw.map((i) => i.profilePictureId).filter(isDefined) } },
-    select: profileImageSelect,
+
+  const profilePictures = await getProfilePicturesForUsers(userIds);
+
+  const clubRequirement = await entityRequiresClub({
+    entityType: 'Post',
+    entityIds: postsRaw.map(({ id }) => id),
   });
+
+  const userEntityAccess = await getPrivateEntityAccessForUser({ userId: user?.id });
+  const privatePostAccessIds = userEntityAccess
+    .filter((x) => x.entityType === 'Post')
+    .map((x) => x.entityId);
+
+  // Filter to published model versions:
+  const filterByPermissionContent = !isOwnerRequest && !user?.isModerator;
+  const modelVersionIds = postsRaw.map((p) => p.modelVersionId).filter(isDefined);
+  const modelVersions =
+    modelVersionIds.length > 0 && filterByPermissionContent
+      ? await dbRead.modelVersion.findMany({
+          where: { id: { in: postsRaw.map((p) => p.modelVersionId).filter(isDefined) } },
+          select: { status: true, id: true },
+        })
+      : [];
+
+  // Filter to collections with permissions:
+  const collectionIds = postsRaw.map((p) => p.collectionId).filter(isDefined);
+  const collections =
+    collectionIds.length > 0 && filterByPermissionContent
+      ? await dbRead.collection.findMany({
+          where: { id: { in: collectionIds } },
+          select: {
+            id: true,
+            read: true,
+            contributors: user?.id
+              ? { select: { userId: true, permissions: true }, where: { userId: user?.id } }
+              : undefined,
+          },
+        })
+      : [];
 
   return {
     nextCursor,
     items: postsRaw
+      // remove unlisted resources the user has no access to:
+      .filter((p) => {
+        // Allow mods and owners to view all.
+        if (user?.isModerator || p.userId === user?.id) return true;
+
+        // Hide posts where the user does not have permission.
+        if (
+          p.unlisted &&
+          p.availability === Availability.Private &&
+          !privatePostAccessIds.includes(p.id)
+        ) {
+          return false;
+        }
+
+        // Hide posts from unpublished model versions:
+        if (
+          p.modelVersionId &&
+          modelVersions.find((x) => x.id === p.modelVersionId)?.status !== 'Published'
+        ) {
+          return false;
+        }
+
+        // Hide posts from collections the user has no access to:
+        if (p.collectionId) {
+          const collection = collections.find((x) => x.id === p.collectionId);
+          if (!collection) return false;
+
+          if (
+            collection.read !== CollectionReadConfiguration.Public &&
+            !collection?.contributors[0]?.permissions.includes(CollectionContributorPermission.VIEW)
+          ) {
+            return false;
+          }
+        }
+
+        return true;
+      })
       .map(({ stats, username, userId: creatorId, userImage, deletedAt, ...post }) => {
         const { imageCount, ...image } =
           images.find((x) => x.postId === post.id) ?? ({ imageCount: 0 } as (typeof images)[0]);
@@ -287,10 +414,11 @@ export const getPostsInfinite = async ({
             image: userImage,
             deletedAt,
             cosmetics: userCosmetics?.[creatorId] ?? [],
-            profilePicture: profilePictures.find((i) => i.id === post.profilePictureId) ?? null,
+            profilePicture: profilePictures[creatorId] ?? null,
           },
           stats,
           image,
+          clubRequirement: clubRequirement.find((r) => r.entityId === post.id),
         };
       })
       .filter((x) => x.imageCount !== 0),
@@ -322,10 +450,21 @@ export const getPostDetail = async ({ id, user }: GetByIdInput & { user?: Sessio
       tags: { select: { tag: { select: simpleTagSelect } } },
     },
   });
+
   if (!post) throw throwNotFoundError();
+
+  const [access] = await hasEntityAccess({
+    userId: user?.id,
+    isModerator: user?.isModerator,
+    entityIds: [id],
+    entityType: 'Post',
+  });
+
   return {
     ...post,
+    detail: access?.hasAccess ?? true ? post.detail : null,
     tags: post.tags.flatMap((x) => x.tag),
+    hasAccess: access.hasAccess,
   };
 };
 
@@ -344,14 +483,21 @@ export const getPostEditDetail = async ({ id }: GetByIdInput) => {
     meta: x.meta as ImageMetaProps | null,
     _count: { tags: imageTagCounts[x.id] },
   }));
+
   const castedPost = {
     ...post,
     images,
   };
 
+  const [entityClubDetails] = await getClubDetailsForResource({
+    entityType: 'Post',
+    entityIds: [post.id],
+  });
+
   return {
     ...castedPost,
     tags: castedPost.tags.flatMap((x) => x.tag),
+    clubs: entityClubDetails?.clubs ?? [],
   };
 };
 
@@ -376,14 +522,27 @@ export const createPost = async ({
     ...rawResult,
     images,
   };
+
+  const [entityClubDetails] = await getClubDetailsForResource({
+    entityType: 'Post',
+    entityIds: [result.id],
+  });
+
   return {
     ...result,
     tags: result.tags.flatMap((x) => x.tag),
+    clubs: entityClubDetails?.clubs ?? [],
   };
 };
 
-export const updatePost = ({ id, ...data }: PostUpdateInput) => {
-  return dbWrite.post.update({
+export const updatePost = async ({
+  id,
+  clubs,
+  userId,
+  isModerator,
+  ...data
+}: PostUpdateInput & { userId?: number; isModerator?: boolean }) => {
+  const post = await dbWrite.post.update({
     where: { id },
     data: {
       ...data,
@@ -391,6 +550,19 @@ export const updatePost = ({ id, ...data }: PostUpdateInput) => {
       detail: data.detail !== undefined ? (data.detail.length > 0 ? data.detail : null) : undefined,
     },
   });
+
+  if (post && clubs && userId) {
+    // Update the resource itself:
+    await upsertClubResource({
+      userId,
+      isModerator,
+      entityId: post.id,
+      entityType: 'Post',
+      clubs: clubs ?? [],
+    });
+  }
+
+  return post;
 };
 
 export const deletePost = async ({ id }: GetByIdInput) => {
@@ -398,6 +570,11 @@ export const deletePost = async ({ id }: GetByIdInput) => {
   if (images.length) {
     for (const image of images) await deleteImageById({ id: image.id });
   }
+
+  await dbWrite.clubPost.deleteMany({
+    where: { entityId: id, entityType: 'Post' },
+  });
+
   await dbWrite.post.delete({ where: { id } });
 };
 
@@ -506,6 +683,23 @@ export const addPostImage = async ({
     select: editPostImageSelect,
   });
   if (!image) throw throwDbError(`Image not found`);
+
+  const modelVersionIds = image.resourceHelper.map((r) => r.modelVersionId).filter(isDefined);
+  // Cache Busting
+  await bustCacheTag(`images-user:${props.userId}`);
+  if (!!modelVersionIds.length) {
+    for (const modelVersionId of modelVersionIds) {
+      await bustCacheTag(`images-modelVersion:${modelVersionId}`);
+    }
+
+    const modelVersions = await dbRead.modelVersion.findMany({
+      where: { id: { in: modelVersionIds } },
+      select: { modelId: true },
+    });
+    for (const modelVersion of modelVersions) {
+      await bustCacheTag(`images-model:${modelVersion.modelId}`);
+    }
+  }
 
   return image;
 };

@@ -50,5 +50,15 @@ export const userPreferencesSchema = z
   })
   .partial();
 
-export const getByEntitySchema = z.object({ entityId: z.number(), entityType: z.string() });
+export const getByEntitySchema = z.object({
+  entityType: z.string(),
+  entityId: z.preprocess((val) => (Array.isArray(val) ? val : [val]), z.array(z.number())),
+});
 export type GetByEntityInput = z.infer<typeof getByEntitySchema>;
+
+export const resourceInput = z.object({
+  entityType: z.string(),
+  entityId: z.number(),
+});
+
+export type ResourceInput = z.infer<typeof resourceInput>;
