@@ -20,11 +20,15 @@ export const comfyMetadataProcessor = createMetadataProcessor({
     const vaes: string[] = [];
     const controlNets: string[] = [];
     const additionalResources: SDResource[] = [];
-    const hashes: Record<string, string> = {};
+    let hashes: Record<string, string> = {};
 
     for (const node of Object.values(prompt)) {
       for (const [key, value] of Object.entries(node.inputs)) {
         if (Array.isArray(value)) node.inputs[key] = prompt[value[0]];
+      }
+
+      if (node.class_type == 'CivitAI_AddModelHashes') {
+        hashes = (node as any).hashes || {};
       }
 
       if (node.class_type == 'KSamplerAdvanced') {
@@ -43,20 +47,13 @@ export const comfyMetadataProcessor = createMetadataProcessor({
         const strength = node.inputs.strength_model as number;
         if (strength < 0.001 && strength > -0.001) continue;
 
-        const hash_value = (node.lora_hash as string) || undefined;
-
         const lora_name = modelFileName(node.inputs.lora_name as string);
-        if (hash_value) {
-          /* This seems to be what the automatic1111 extension for CivitAI generates for LoRAs. */
-          hashes[`lora:${lora_name}`] = hash_value;
-        }
 
         additionalResources.push({
           name: lora_name,
           type: 'lora',
           weight: strength,
           weightClip: node.inputs.strength_clip as number,
-          hash: hash_value,
         });
       }
 
@@ -64,11 +61,7 @@ export const comfyMetadataProcessor = createMetadataProcessor({
         const model_name = modelFileName(node.inputs.ckpt_name as string);
         models.push(model_name);
 
-        const hash_value = (node.ckpt_hash as string) || undefined;
-
-        if (!hashes.model && hash_value) hashes.model = hash_value;
-
-        additionalResources.push({ name: model_name, type: 'model', hash: hash_value });
+        additionalResources.push({ name: model_name, type: 'model' });
       }
 
       if (node.class_type == 'UpscaleModelLoader') upscalers.push(node.inputs.model_name as string);
